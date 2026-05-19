@@ -1,16 +1,17 @@
 {
   "version": 2,
-  "devCommand": "node server.js",
-  "buildCommand": "npm install",
   "functions": {
-    "api/*.js": {
-      "runtime": "@vercel/node@5"
-    }
+    "api/chat.js":   { "maxDuration": 60 },
+    "api/health.js": { "maxDuration": 10 }
   },
-  "routes": [
+  "headers": [
     {
-      "src": "/api/(.*)",
-      "dest": "/api/$1"
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "Access-Control-Allow-Origin",  "value": "*" },
+        { "key": "Access-Control-Allow-Methods", "value": "GET, POST, OPTIONS" },
+        { "key": "Access-Control-Allow-Headers", "value": "Content-Type, Authorization" }
+      ]
     }
   ]
 }
