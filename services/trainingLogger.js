@@ -27,7 +27,7 @@ export async function logInteraction({ conversationId, userQuery, searchResults,
     messages: [
       {
         role: "system",
-        content: "You are Zuno, a helpful AI assistant with real-time web access.",
+        content: "You are Luo, a helpful AI assistant with real-time web access.",
       },
       { role: "user",      content: userQuery },
       { role: "assistant", content: assistantResponse },

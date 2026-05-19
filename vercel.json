@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "devCommand": "node server.js",
+  "buildCommand": "npm install",
+  "functions": {
+    "api/*.js": {
+      "runtime": "@vercel/node@5"
+    }
+  },
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/api/$1"
+    }
+  ]
+}

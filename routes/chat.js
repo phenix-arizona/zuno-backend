@@ -6,7 +6,7 @@ import { logInteraction } from "../services/trainingLogger.js";
 const router = express.Router();
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const ZUNO_SYSTEM_PROMPT = `You are Zuno, an AI assistant with real-time web access.
+const ZUNO_SYSTEM_PROMPT = `You are Luo, an AI assistant with real-time web access.
 
 RULES:
 1. You ALWAYS have fresh web search results provided to you in each message when relevant.

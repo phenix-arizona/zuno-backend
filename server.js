@@ -27,7 +27,7 @@ app.get("/health", (_req, res) => res.json({
 }));
 
 app.listen(PORT, () => {
-  console.log(`\n🚀 Zuno backend → http://localhost:${PORT}`);
+  console.log(`\n🚀 Luo backend → http://localhost:${PORT}`);
   console.log(`🔍 Search: ${process.env.BRAVE_SEARCH_API_KEY ? "Brave" : process.env.SERPER_API_KEY ? "Serper" : "⚠ No key — set BRAVE_SEARCH_API_KEY"}`);
   console.log(`🤖 Claude: ${process.env.ANTHROPIC_API_KEY ? "✓ key found" : "⚠ ANTHROPIC_API_KEY missing"}\n`);
 });
