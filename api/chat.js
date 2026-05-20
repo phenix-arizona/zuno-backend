@@ -42,7 +42,8 @@ function injectSearch(messages, results) {
 
 export default async function handler(req, res) {
   // ── CORS ──────────────────────────────────────────────────────────────────
-  res.setHeader("Access-Control-Allow-Origin",  "*");
+  const origin = process.env.FRONTEND_URL || "https://luo-ai.vercel.app";
+  res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") { res.status(200).end(); return; }

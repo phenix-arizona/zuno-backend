@@ -1,23 +1,14 @@
 {
   "name": "luo-backend",
-  "version": "2.0.0",
   "private": true,
+  "version": "2.0.0",
   "type": "module",
-  "engines": {
-    "node": ">=18"
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "dev":   "node --watch dev-server.js",
+    "start": "node dev-server.js"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0",
-    "@tavily/core": "^0.7.3",
-    "cors": "^2.8.6",
-    "dotenv": "^17.4.2",
-    "express": "^5.2.1",
-    "googleapis": "^171.4.0",
-    "helmet": "^8.1.0",
-    "morgan": "^1.10.1"
-  },
-  "scripts": {
-    "dev": "node server.js",
-    "start": "node server.js"
+    "@anthropic-ai/sdk": "^0.39.0"
   }
 }
