@@ -15,8 +15,7 @@ export async function searchWeb(query, count = 5) {
 }
 
 // ── Tavily ────────────────────────────────────────────────────────────────────
-// Docs: https://docs.tavily.com/docs/rest-api/api-reference
-// Free tier: 1,000 credits/month — each search = 1 credit
+// Docs: https://docs.tavily.com  —  free: 1,000 credits/month
 async function tavilySearch(query, count, apiKey) {
   const res = await fetch("https://api.tavily.com/search", {
     method:  "POST",
@@ -24,33 +23,46 @@ async function tavilySearch(query, count, apiKey) {
     body: JSON.stringify({
       api_key:        apiKey,
       query,
-      search_depth:   "basic",   // "basic" (fast) or "advanced" (deeper, costs 2 credits)
+      search_depth:   "basic",
       max_results:    count,
-      include_answer: false,     // we let Claude synthesise — no need for Tavily's summary
+      include_answer: false,
     }),
   });
-  if (!res.ok) throw new Error(`Tavily HTTP ${res.status}: ${await res.text()}`);
+
+  if (!res.ok) {
+    const err = await res.text().catch(() => res.status);
+    throw new Error(`Tavily HTTP ${res.status}: ${err}`);
+  }
 
   const data = await res.json();
   return (data.results ?? []).map(r => ({
     title:   r.title,
     url:     r.url,
     snippet: r.content ?? "",
-    score:   r.score   ?? 0,     // Tavily provides a relevance score (0–1)
+    score:   r.score   ?? 0,
   }));
 }
 
 // ── Brave (fallback) ──────────────────────────────────────────────────────────
+// NOTE: Do NOT use the `freshness` param — it is a paid-only feature and
+//       returns HTTP 422 on free-tier keys.
 async function braveSearch(query, count, apiKey) {
   const url = new URL("https://api.search.brave.com/res/v1/web/search");
-  url.searchParams.set("q",         query);
-  url.searchParams.set("count",     String(count));
-  url.searchParams.set("freshness", "pw");
+  url.searchParams.set("q",     query);
+  url.searchParams.set("count", String(Math.min(count, 20))); // max 20
 
   const res = await fetch(url.toString(), {
-    headers: { Accept: "application/json", "X-Subscription-Token": apiKey },
+    headers: {
+      "Accept":               "application/json",
+      "Accept-Encoding":      "gzip",
+      "X-Subscription-Token": apiKey,
+    },
   });
-  if (!res.ok) throw new Error(`Brave Search HTTP ${res.status}`);
+
+  if (!res.ok) {
+    const err = await res.text().catch(() => res.status);
+    throw new Error(`Brave Search HTTP ${res.status}: ${err}`);
+  }
 
   const data = await res.json();
   return (data.web?.results ?? []).map(r => ({
@@ -67,7 +79,11 @@ async function serperSearch(query, count, apiKey) {
     headers: { "X-API-KEY": apiKey, "Content-Type": "application/json" },
     body:    JSON.stringify({ q: query, num: count }),
   });
-  if (!res.ok) throw new Error(`Serper HTTP ${res.status}`);
+
+  if (!res.ok) {
+    const err = await res.text().catch(() => res.status);
+    throw new Error(`Serper HTTP ${res.status}: ${err}`);
+  }
 
   const data = await res.json();
   return (data.organic ?? []).map(r => ({

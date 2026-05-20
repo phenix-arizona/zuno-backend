@@ -1,91 +1,102 @@
-// dev-server.js — Luo Backend local development server
-// Wraps the Vercel serverless functions so you can run them with plain Node.js.
-// Usage: node dev-server.js
+// dev-server.js — Luo Backend local dev server
+// Properly handles SSE streaming for /api/chat
 
-import http from "http";
+import http    from "http";
 import { readFileSync } from "fs";
 import { resolve, dirname } from "path";
-import { fileURLToPath } from "url";
+import { fileURLToPath }   from "url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
 
-// Load .env manually (no dotenv package needed)
+// ── Load .env ─────────────────────────────────────────────────────────────────
 try {
-  const envPath = resolve(__dirname, ".env");
-  const lines   = readFileSync(envPath, "utf8").split("\n");
+  const lines = readFileSync(resolve(__dirname, ".env"), "utf8").split("\n");
   for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const eq  = trimmed.indexOf("=");
+    const t = line.trim();
+    if (!t || t.startsWith("#")) continue;
+    const eq  = t.indexOf("=");
     if (eq < 0) continue;
-    const key = trimmed.slice(0, eq).trim();
-    const val = trimmed.slice(eq + 1).trim().replace(/^["']|["']$/g, "");
+    const key = t.slice(0, eq).trim();
+    const val = t.slice(eq + 1).trim().replace(/^["']|["']$/g, "");
     if (key && !process.env[key]) process.env[key] = val;
   }
   console.log("✅ .env loaded");
 } catch {
-  console.warn("⚠  No .env file found — using system environment variables");
+  console.warn("⚠  No .env file — using system env vars");
 }
 
-// Dynamically import the handler modules
+// ── Import handlers ───────────────────────────────────────────────────────────
 const { default: chatHandler   } = await import("./api/chat.js");
 const { default: healthHandler } = await import("./api/health.js");
 
-// Minimal req/res adapter so Express-style handlers work with Node's http module
+// ── req/res adapter ───────────────────────────────────────────────────────────
 function adapt(req, res, handler) {
   const chunks = [];
   req.on("data", c => chunks.push(c));
   req.on("end", async () => {
+    // Parse body
     const raw = Buffer.concat(chunks).toString();
-    try { req.body = raw ? JSON.parse(raw) : {}; } catch { req.body = {}; }
+    try   { req.body = raw ? JSON.parse(raw) : {}; }
+    catch { req.body = {}; }
 
-    // Minimal res shim
-    const headers = {};
-    let   statusCode = 200;
+    // Header store — flushed on first write/end
+    const pendingHeaders = {
+      "Access-Control-Allow-Origin": "*",
+    };
+    let statusCode    = 200;
+    let headsFlushed  = false;
 
-    res.setHeader  = (k, v)  => { headers[k] = v; };
-    res.getHeader  = (k)     => headers[k];
-    res.status     = (code)  => { statusCode = code; return res; };
-    res.json       = (data)  => {
-      if (!res.headersSent) {
-        res.writeHead(statusCode, { "Content-Type": "application/json", ...headers });
+    function flushHeaders() {
+      if (!headsFlushed) {
+        headsFlushed = true;
+        res.writeHead(statusCode, pendingHeaders);
       }
+    }
+
+    // Shim methods
+    res.setHeader = (k, v) => {
+      if (headsFlushed) return; // too late — ignore (headers already sent)
+      pendingHeaders[k] = v;
+    };
+    res.getHeader = (k) => pendingHeaders[k];
+    res.status    = (code) => { statusCode = code; return res; };
+
+    res.json = (data) => {
+      pendingHeaders["Content-Type"] = pendingHeaders["Content-Type"] || "application/json";
+      flushHeaders();
       res.end(JSON.stringify(data));
     };
 
-    const origWrite    = res.write.bind(res);
-    const origEnd      = res.end.bind(res);
-    let   headersWritten = false;
-
+    // write() — used by SSE streaming; flush headers first
+    const _write = res.write.bind(res);
     res.write = (chunk) => {
-      if (!headersWritten) {
-        res.writeHead(statusCode, headers);
-        headersWritten = true;
-      }
-      return origWrite(chunk);
+      flushHeaders();        // ensures Content-Type: text/event-stream is sent first
+      return _write(chunk);
     };
+
+    // end() — final flush
+    const _end = res.end.bind(res);
     res.end = (chunk) => {
-      if (!headersWritten) {
-        res.writeHead(statusCode, headers);
-        headersWritten = true;
-      }
-      return origEnd(chunk);
+      flushHeaders();
+      return _end(chunk);
     };
 
     try {
       await handler(req, res);
     } catch (err) {
-      console.error("[handler error]", err);
-      if (!headersWritten) {
+      console.error("[handler]", err.message);
+      if (!headsFlushed) {
         res.writeHead(500, { "Content-Type": "application/json" });
+        headsFlushed = true;
       }
-      res.end(JSON.stringify({ error: err.message }));
+      _end(JSON.stringify({ error: err.message }));
     }
   });
 }
 
-const server = http.createServer((req, res) => {
+// ── HTTP server ───────────────────────────────────────────────────────────────
+http.createServer((req, res) => {
   const url = req.url.split("?")[0];
 
   // CORS preflight
@@ -104,12 +115,16 @@ const server = http.createServer((req, res) => {
 
   res.writeHead(404, { "Content-Type": "application/json" });
   res.end(JSON.stringify({ error: "Not found", available: ["/api/chat", "/api/health"] }));
-});
 
-server.listen(PORT, () => {
+}).listen(PORT, () => {
   console.log(`\n🚀 Luo backend  →  http://localhost:${PORT}`);
-  console.log(`🔍 Search  : ${process.env.TAVILY_API_KEY ? "Tavily ✅" : process.env.BRAVE_SEARCH_API_KEY ? "Brave ✅" : process.env.SERPER_API_KEY ? "Serper ✅" : "⚠  Set TAVILY_API_KEY in .env"}`);
-  console.log(`🤖 Claude  : ${process.env.ANTHROPIC_API_KEY   ? "✅ key found" : "⚠  ANTHROPIC_API_KEY missing"}`);
+  console.log(`🔍 Search  : ${
+    process.env.TAVILY_API_KEY       ? "Tavily ✅" :
+    process.env.BRAVE_SEARCH_API_KEY ? "Brave ✅"  :
+    process.env.SERPER_API_KEY       ? "Serper ✅" :
+    "⚠  Set TAVILY_API_KEY in .env"
+  }`);
+  console.log(`🤖 Claude  : ${process.env.ANTHROPIC_API_KEY ? "✅ key found" : "⚠  ANTHROPIC_API_KEY missing"}`);
   console.log(`\nEndpoints:`);
   console.log(`  POST http://localhost:${PORT}/api/chat`);
   console.log(`  GET  http://localhost:${PORT}/api/health\n`);
