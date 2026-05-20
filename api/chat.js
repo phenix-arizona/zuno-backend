@@ -1,9 +1,9 @@
 // api/chat.js — Luo AI chat endpoint
-// Vercel Serverless Function — no Express, no server.js needed.
-// Handles: web search injection → Claude streaming → SSE back to client.
+// Uses Vercel Edge Runtime for true SSE streaming support
+
+export const config = { runtime: "edge" };
 
 import Anthropic from "@anthropic-ai/sdk";
-import { searchWeb } from "./lib/search.js";
 
 const LUO_SYSTEM = `You are Luo, an AI assistant with real-time web access.
 
@@ -14,7 +14,6 @@ RULES:
 4. Never say "as of my knowledge cutoff" — you have live search results.
 5. Be concise, direct, and genuinely helpful.`;
 
-// Skip search for greetings and pure coding tasks
 function shouldSearch(text) {
   if (!text || text.length < 4) return false;
   return !/^(hi|hello|hey|thanks|ok|sure|yes|no)\b/i.test(text.trim());
@@ -27,11 +26,48 @@ function extractText(content) {
   return "";
 }
 
+async function searchWeb(query) {
+  const tavilyKey = process.env.TAVILY_API_KEY;
+  const braveKey  = process.env.BRAVE_SEARCH_API_KEY;
+  const serperKey = process.env.SERPER_API_KEY;
+
+  try {
+    if (tavilyKey) {
+      const r = await fetch("https://api.tavily.com/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key: tavilyKey, query, search_depth: "basic", max_results: 5, include_answer: false }),
+      });
+      if (!r.ok) throw new Error(`Tavily ${r.status}`);
+      const d = await r.json();
+      return (d.results ?? []).map(x => ({ title: x.title, url: x.url, snippet: x.content ?? "" }));
+    }
+    if (braveKey) {
+      const url = new URL("https://api.search.brave.com/res/v1/web/search");
+      url.searchParams.set("q", query); url.searchParams.set("count", "5");
+      const r = await fetch(url.toString(), { headers: { Accept: "application/json", "X-Subscription-Token": braveKey } });
+      if (!r.ok) throw new Error(`Brave ${r.status}`);
+      const d = await r.json();
+      return (d.web?.results ?? []).map(x => ({ title: x.title, url: x.url, snippet: x.description ?? "" }));
+    }
+    if (serperKey) {
+      const r = await fetch("https://google.serper.dev/search", {
+        method: "POST", headers: { "X-API-KEY": serperKey, "Content-Type": "application/json" },
+        body: JSON.stringify({ q: query, num: 5 }),
+      });
+      if (!r.ok) throw new Error(`Serper ${r.status}`);
+      const d = await r.json();
+      return (d.organic ?? []).map(x => ({ title: x.title, url: x.link, snippet: x.snippet ?? "" }));
+    }
+  } catch (err) {
+    console.error("[search]", err.message);
+  }
+  return [];
+}
+
 function injectSearch(messages, results) {
   if (!results.length) return messages;
-  const ctx = results
-    .map((r, i) => `[${i + 1}] ${r.title}\nURL: ${r.url}\nSnippet: ${r.snippet}`)
-    .join("\n\n");
+  const ctx = results.map((r, i) => `[${i+1}] ${r.title}\nURL: ${r.url}\nSnippet: ${r.snippet}`).join("\n\n");
   const last = messages[messages.length - 1];
   const text = extractText(last.content);
   return [
@@ -40,92 +76,85 @@ function injectSearch(messages, results) {
   ];
 }
 
-export default async function handler(req, res) {
-  // ── CORS ──────────────────────────────────────────────────────────────────
+export default async function handler(req) {
   const origin = process.env.FRONTEND_URL || "https://luo-ai.vercel.app";
-  res.setHeader("Access-Control-Allow-Origin", origin);
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  if (req.method === "OPTIONS") { res.status(200).end(); return; }
-  if (req.method !== "POST")   { res.status(405).json({ error: "Method not allowed" }); return; }
 
-  // ── Validate env ──────────────────────────────────────────────────────────
-  if (!process.env.ANTHROPIC_API_KEY) {
-    res.status(500).json({ error: "ANTHROPIC_API_KEY is not set in Vercel Environment Variables." });
-    return;
+  const corsHeaders = {
+    "Access-Control-Allow-Origin":  origin,
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+  };
+
+  // CORS preflight
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders });
   }
-
-  // ── Parse body ────────────────────────────────────────────────────────────
-  let body;
-  try { body = typeof req.body === "string" ? JSON.parse(req.body) : req.body; }
-  catch { res.status(400).json({ error: "Invalid JSON body" }); return; }
-
-  const { messages, model, system: customSystem, max_tokens, stream: wantStream } = body ?? {};
-
-  if (!Array.isArray(messages) || messages.length === 0) {
-    res.status(400).json({ error: "messages array is required" });
-    return;
-  }
-
-  // ── Web search ────────────────────────────────────────────────────────────
-  const userText = extractText(messages[messages.length - 1].content);
-  let augmented  = messages;
-
-  if (shouldSearch(userText)) {
-    try {
-      const results = await searchWeb(userText, 5);
-      augmented = injectSearch(messages, results);
-    } catch (err) {
-      console.error("[search]", err.message);
-      // Search failure is non-fatal — continue without results
-    }
-  }
-
-  // ── Build system prompt ───────────────────────────────────────────────────
-  const finalSystem = customSystem
-    ? `${LUO_SYSTEM}\n\n---\nCustom instructions:\n${customSystem}`
-    : LUO_SYSTEM;
-
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-  // ── Streaming ─────────────────────────────────────────────────────────────
-  if (wantStream) {
-    res.setHeader("Content-Type",  "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection",    "keep-alive");
-
-    const write = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
-
-    try {
-      const stream = anthropic.messages.stream({
-        model:      model ?? "claude-sonnet-4-6",
-        max_tokens: max_tokens ?? 2048,
-        system:     finalSystem,
-        messages:   augmented,
-      });
-
-      stream.on("text",    text  => write({ type: "text", text }));
-      stream.on("message", msg  => { write({ type: "done", usage: msg.usage }); res.end(); });
-      stream.on("error",   err  => { write({ type: "error", message: err.message }); res.end(); });
-    } catch (err) {
-      console.error("[claude stream]", err);
-      write({ type: "error", message: err.message });
-      res.end();
-    }
-    return;
-  }
-
-  // ── Non-streaming fallback ────────────────────────────────────────────────
-  try {
-    const msg = await anthropic.messages.create({
-      model:      model ?? "claude-sonnet-4-6",
-      max_tokens: max_tokens ?? 2048,
-      system:     finalSystem,
-      messages:   augmented,
+  if (req.method !== "POST") {
+    return new Response(JSON.stringify({ error: "Method not allowed" }), {
+      status: 405, headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
-    res.status(200).json(msg);
-  } catch (err) {
-    console.error("[claude]", err);
-    res.status(500).json({ error: err.message ?? "Claude API error" });
   }
+
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return new Response(JSON.stringify({ error: "ANTHROPIC_API_KEY not set" }), {
+      status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+
+  let body;
+  try { body = await req.json(); }
+  catch { return new Response(JSON.stringify({ error: "Invalid JSON" }), { status: 400, headers: corsHeaders }); }
+
+  const { messages, model, system: customSystem, max_tokens } = body ?? {};
+
+  if (!Array.isArray(messages) || !messages.length) {
+    return new Response(JSON.stringify({ error: "messages required" }), {
+      status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+
+  // Web search
+  const userText = extractText(messages[messages.length - 1].content);
+  let augmented = messages;
+  if (shouldSearch(userText)) {
+    const results = await searchWeb(userText);
+    augmented = injectSearch(messages, results);
+  }
+
+  const finalSystem = customSystem ? `${LUO_SYSTEM}\n\n---\nCustom instructions:\n${customSystem}` : LUO_SYSTEM;
+  const anthropic   = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+  // True streaming via Web Streams API (works on Vercel Edge)
+  const encoder = new TextEncoder();
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (obj) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
+      try {
+        const aiStream = anthropic.messages.stream({
+          model:      model ?? "claude-sonnet-4-6",
+          max_tokens: max_tokens ?? 2048,
+          system:     finalSystem,
+          messages:   augmented,
+        });
+        aiStream.on("text",    text => send({ type: "text", text }));
+        aiStream.on("message", msg  => { send({ type: "done", usage: msg.usage }); controller.close(); });
+        aiStream.on("error",   err  => { send({ type: "error", message: err.message }); controller.close(); });
+      } catch (err) {
+        send({ type: "error", message: err.message });
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      ...corsHeaders,
+      "Content-Type":  "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection":    "keep-alive",
+      "X-Accel-Buffering": "no",   // disables nginx buffering on Vercel
+    },
+  });
 }

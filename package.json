@@ -9,6 +9,7 @@
     "start": "node dev-server.js"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0"
+    "@anthropic-ai/sdk": "^0.39.0",
+    "undici":            "^6.19.2"
   }
 }

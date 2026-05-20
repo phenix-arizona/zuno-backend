@@ -1,5 +1,6 @@
 // dev-server.js — Luo Backend local dev server
-// Properly handles SSE streaming for /api/chat
+// Handles Edge-style handlers (return new Response(...)) AND
+// traditional Node handlers (res.write/res.end)
 
 import http    from "http";
 import { readFileSync } from "fs";
@@ -15,7 +16,7 @@ try {
   for (const line of lines) {
     const t = line.trim();
     if (!t || t.startsWith("#")) continue;
-    const eq  = t.indexOf("=");
+    const eq = t.indexOf("=");
     if (eq < 0) continue;
     const key = t.slice(0, eq).trim();
     const val = t.slice(eq + 1).trim().replace(/^["']|["']$/g, "");
@@ -26,77 +27,62 @@ try {
   console.warn("⚠  No .env file — using system env vars");
 }
 
+// ── Polyfill Web APIs needed by Edge-style handlers ───────────────────────────
+if (!globalThis.Request) {
+  const { Request, Response, Headers } = await import("undici").catch(() => {
+    // undici not available — use minimal shims
+    return { Request: class {}, Response: class {}, Headers: class {} };
+  });
+  globalThis.Request  = Request;
+  globalThis.Response = Response;
+  globalThis.Headers  = Headers;
+}
+
 // ── Import handlers ───────────────────────────────────────────────────────────
 const { default: chatHandler   } = await import("./api/chat.js");
 const { default: healthHandler } = await import("./api/health.js");
 
-// ── req/res adapter ───────────────────────────────────────────────────────────
-function adapt(req, res, handler) {
+// ── Adapt Edge-style handler (returns Response) to Node http ─────────────────
+async function adaptEdge(req, nodeRes, handler) {
   const chunks = [];
-  req.on("data", c => chunks.push(c));
-  req.on("end", async () => {
-    // Parse body
-    const raw = Buffer.concat(chunks).toString();
-    try   { req.body = raw ? JSON.parse(raw) : {}; }
-    catch { req.body = {}; }
+  await new Promise(r => { req.on("data", c => chunks.push(c)); req.on("end", r); });
+  const rawBody = Buffer.concat(chunks).toString();
 
-    // Header store — flushed on first write/end
-    const pendingHeaders = {
-      "Access-Control-Allow-Origin": "*",
-    };
-    let statusCode    = 200;
-    let headsFlushed  = false;
-
-    function flushHeaders() {
-      if (!headsFlushed) {
-        headsFlushed = true;
-        res.writeHead(statusCode, pendingHeaders);
-      }
-    }
-
-    // Shim methods
-    res.setHeader = (k, v) => {
-      if (headsFlushed) return; // too late — ignore (headers already sent)
-      pendingHeaders[k] = v;
-    };
-    res.getHeader = (k) => pendingHeaders[k];
-    res.status    = (code) => { statusCode = code; return res; };
-
-    res.json = (data) => {
-      pendingHeaders["Content-Type"] = pendingHeaders["Content-Type"] || "application/json";
-      flushHeaders();
-      res.end(JSON.stringify(data));
-    };
-
-    // write() — used by SSE streaming; flush headers first
-    const _write = res.write.bind(res);
-    res.write = (chunk) => {
-      flushHeaders();        // ensures Content-Type: text/event-stream is sent first
-      return _write(chunk);
-    };
-
-    // end() — final flush
-    const _end = res.end.bind(res);
-    res.end = (chunk) => {
-      flushHeaders();
-      return _end(chunk);
-    };
-
-    try {
-      await handler(req, res);
-    } catch (err) {
-      console.error("[handler]", err.message);
-      if (!headsFlushed) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        headsFlushed = true;
-      }
-      _end(JSON.stringify({ error: err.message }));
-    }
+  // Build a Web API Request
+  const url     = `http://localhost:${PORT}${req.url}`;
+  const headers = new Headers(req.headers);
+  const webReq  = new Request(url, {
+    method:  req.method,
+    headers,
+    body:    ["POST","PUT","PATCH"].includes(req.method) ? rawBody : undefined,
   });
+  webReq.json = () => Promise.resolve(rawBody ? JSON.parse(rawBody) : {});
+
+  // Call handler
+  const webRes = await handler(webReq);
+
+  // Write status + headers
+  const resHeaders = {};
+  webRes.headers.forEach((v, k) => { resHeaders[k] = v; });
+  // Always allow local frontend
+  resHeaders["Access-Control-Allow-Origin"] = "*";
+
+  nodeRes.writeHead(webRes.status, resHeaders);
+
+  // Stream the body
+  if (webRes.body) {
+    const reader = webRes.body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      nodeRes.write(Buffer.from(value));
+    }
+  }
+  nodeRes.end();
 }
 
 // ── HTTP server ───────────────────────────────────────────────────────────────
-http.createServer((req, res) => {
+http.createServer(async (req, res) => {
   const url = req.url.split("?")[0];
 
   // CORS preflight
@@ -110,8 +96,30 @@ http.createServer((req, res) => {
     return;
   }
 
-  if (url === "/api/chat"   && req.method === "POST") return adapt(req, res, chatHandler);
-  if (url === "/api/health" && req.method === "GET")  return adapt(req, res, healthHandler);
+  if (url === "/api/chat" && req.method === "POST") {
+    await adaptEdge(req, res, chatHandler);
+    return;
+  }
+
+  // Health uses traditional Node handler
+  if (url === "/api/health" && req.method === "GET") {
+    const chunks = [];
+    await new Promise(r => { req.on("data", c => chunks.push(c)); req.on("end", r); });
+    req.body = {};
+    const headers = {};
+    let statusCode = 200;
+    res.setHeader = (k, v) => { headers[k] = v; };
+    res.status    = (c)    => { statusCode = c; return res; };
+    const _end    = res.end.bind(res);
+    res.json = (d) => {
+      headers["Content-Type"] = "application/json";
+      headers["Access-Control-Allow-Origin"] = "*";
+      res.writeHead(statusCode, headers);
+      _end(JSON.stringify(d));
+    };
+    await healthHandler(req, res);
+    return;
+  }
 
   res.writeHead(404, { "Content-Type": "application/json" });
   res.end(JSON.stringify({ error: "Not found", available: ["/api/chat", "/api/health"] }));
