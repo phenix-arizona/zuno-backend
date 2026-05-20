@@ -1,9 +1,5 @@
 {
   "version": 2,
-  "functions": {
-    "api/chat.js":   { "runtime": "edge" },
-    "api/health.js": { "maxDuration": 10  }
-  },
   "headers": [
     {
       "source": "/api/(.*)",
